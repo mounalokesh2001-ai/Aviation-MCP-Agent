@@ -1,4 +1,5 @@
 import requests
+import pandas as pd
 
 # Tool 1: Live flight data
 def get_live_flights():
@@ -34,3 +35,13 @@ def filter_flights_by_country(country: str):
     ]
 
     return {"filtered_flights": result}
+
+
+
+# tool 3
+def get_aviation_incidents():
+    try:
+        df = pd.read_csv("aviation_data.csv")
+        return {"incidents": df.to_dict(orient="records")}
+    except Exception as e:
+        return {"error": str(e)}
