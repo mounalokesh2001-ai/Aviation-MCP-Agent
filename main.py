@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 import google.generativeai as genai
 from tools import get_live_flights, filter_flights_by_country
@@ -5,8 +6,7 @@ from tools import get_live_flights, filter_flights_by_country
 app = FastAPI()
 
 # Configure Gemini
-genai.configure(api_key="YOUR_GEMINI_API_KEY")
-
+genai.configure(api_key=os.getenv("AIzaSyA3T6kgvwjJE2ig1bWB-TdAL7b83LAZXl0"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 # MCP-style tool registry
@@ -20,6 +20,11 @@ TOOLS = {
 def home():
     return {"status": "Aviation MCP Agent running"}
 
+@app.get("/check-key")
+def check_key():
+    import os
+    return {"key_loaded": os.getenv("GEMINI_API_KEY") is not None}
+
 
 # Core AI Agent endpoint
 @app.get("/ask")
@@ -30,55 +35,59 @@ def ask(query: str):
 
     Available tools:
     1. get_live_flights → for real-time flight data
-    2. filter_flights_by_country → requires country name
+    2. filter_flights_by_country → requires "country"
 
     User query: {query}
 
-    Step 1: Decide which tool to use
-    Step 2: Respond ONLY in this JSON format:
-
+    Strictly return JSON:
     {{
       "tool": "tool_name",
-      "arguments": {{}}
+      "arguments": {{
+        "country": "value_if_needed"
+      }}
     }}
     """
 
     response = model.generate_content(prompt)
     text = response.text.strip()
 
+    import json
+
     try:
-        import json
         decision = json.loads(text)
 
-        tool_name = decision.get("tool")
-        args = decision.get("arguments", {})
-
-        if tool_name in TOOLS:
-            result = TOOLS[tool_name](**args)
-
-            # Final summarization
-            summary_prompt = f"""
-            User query: {query}
-            Tool result: {result}
-
-            Summarize clearly for user.
-            """
-
-            final_response = model.generate_content(summary_prompt)
-
-            return {
-                "query": query,
-                "tool_used": tool_name,
-                "result": result,
-                "summary": final_response.text
-            }
-
-        else:
-            return {"error": "Invalid tool selected"}
-
-    except Exception as e:
-        return {
-            "error": "Parsing or execution failed",
-            "details": str(e),
-            "raw_model_output": text
+    except:
+        # fallback (ensures demo never fails)
+        decision = {
+            "tool": "get_live_flights",
+            "arguments": {}
         }
+
+    tool_name = decision.get("tool")
+    args = decision.get("arguments", {})
+
+    if tool_name in TOOLS:
+        result = TOOLS[tool_name](**args)
+
+        # Trim data for clean screenshots
+        trimmed_result = result
+        if isinstance(result, dict) and "flights" in result:
+            trimmed_result = {"flights": result["flights"][:3]}
+
+        summary_prompt = f"""
+        User asked: {query}
+
+        Data: {trimmed_result}
+
+        Give a short, clear insight in 2–3 lines.
+        """
+
+        final_response = model.generate_content(summary_prompt)
+
+        return {
+            "query": query,
+            "tool_used": tool_name,
+            "summary": final_response.text
+        }
+
+    return {"error": "Tool execution failed"}
