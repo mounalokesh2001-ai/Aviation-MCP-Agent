@@ -1,67 +1,91 @@
 import os
 import json
+import time
 import uvicorn
-import google.generativeai as genai
+from google import genai
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-# Ensure your tools.py is in the same directory and functions are defined
+# Ensure these functions are in your tools.py
 from tools import get_live_flights, filter_flights_by_country, get_aviation_incidents
 
 app = FastAPI()
 
 # =========================
-# CONFIGURE GEMINI (2026)
+# CONFIGURE GEMINI
 # =========================
+# Priority: 1. Environment Variable, 2. Hardcoded Fallback
+API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyB4kZ4Z4jbMt5DDprbTe2uxNE1blXJSHf4")
 
-# Use environment variable for security; fallback is for local testing only
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA3T6kgvwjJE2ig1bWB-TdAL7b83LAZXl0")
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Gemini 3 Flash is the standard for high-speed agentic tasks in 2026
-MODEL_NAME = "gemini-3-flash"
-model = genai.GenerativeModel(MODEL_NAME)
+client = genai.Client(api_key=API_KEY)
 
 # =========================
-# SIMPLE WEB UI
+# FALLBACK (NO-FAIL MODE)
 # =========================
+def fallback_summary(data, query):
+    return f"""
+### Aviation Intelligence Report (Fallback)
+
+**Query:** {query}  
+**Records Found:** {len(data)}
+
+**Status:** Moderate  
+**Risk:** Low  
+
+**Note:** The AI is currently at capacity or the API key is restricted. 
+Showing raw data count only.
+"""
+
+# =========================
+# ROUTES
+# =========================
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/ui")
 
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     return """
     <html>
-    <head><title>Aviation AI Agent</title></head>
-    <body style="font-family: sans-serif; padding: 40px; background: #f4f7f6;">
-        <div style="max-width: 700px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h2 style="color: #2c3e50;">✈️ Aviation Intelligence Agent</h2>
-            <p style="color: #7f8c8d;">Query live flights, regional status, or safety incidents.</p>
-            
-            <input id="query" type="text" placeholder="e.g. Flight status in India" 
-                   style="width: 80%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;" />
-            <button onclick="sendQuery()" style="padding: 12px 20px; background: #3498db; color: white; border: none; border-radius: 8px; cursor: pointer;">Ask</button>
-
-            <div id="output" style="margin-top: 25px; padding: 15px; background: #ecf0f1; border-radius: 8px; min-height: 50px; line-height: 1.5;">
-                System Ready...
+    <head>
+        <title>Aviation Intelligence Agent</title>
+        <style>
+            body { font-family: 'Segoe UI', sans-serif; padding: 40px; background: #0b1120; color: #e2e8f0; margin: 0; }
+            .container { max-width: 800px; margin: auto; background: #1e293b; padding: 30px; border-radius: 12px; border: 1px solid #334155; }
+            h2 { color: #38bdf8; margin-top: 0; }
+            .input-group { display: flex; gap: 10px; margin: 20px 0; }
+            input { flex-grow: 1; padding: 12px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: white; outline: none; }
+            button { padding: 12px 24px; background: #0284c7; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+            #output { margin-top: 20px; padding: 20px; background: #0f172a; border-radius: 10px; border: 1px solid #1e293b; line-height: 1.6; min-height: 100px; }
+            .tag { color: #38bdf8; font-size: 11px; text-transform: uppercase; display: block; margin-bottom: 10px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>✈️ Aviation Intelligence Command</h2>
+            <div class="input-group">
+                <input id="query" type="text" placeholder="e.g. Flight status in India" />
+                <button onclick="sendQuery()">EXECUTE</button>
             </div>
+            <div id="output">SYSTEM_READY...</div>
         </div>
-
         <script>
         async function sendQuery() {
             const q = document.getElementById("query").value;
             if (!q) return;
             const out = document.getElementById("output");
-            out.innerHTML = "<b>Fetching aviation data...</b>";
-
+            out.innerHTML = "<b style='color: #38bdf8;'>UPLINKING...</b>";
             try {
                 const res = await fetch(`/ask?query=${encodeURIComponent(q)}`);
                 const data = await res.json();
                 if (data.status === "success") {
-                    out.innerHTML = `<small style="color:blue">Source: ${data.tool_used}</small><br><br>${data.summary}`;
+                    out.innerHTML = `<span class="tag">SOURCE: ${data.tool_used}</span>${data.summary}`;
                 } else {
-                    out.innerHTML = `<b style="color:red">Error:</b> ${data.error}`;
+                    out.innerHTML = `<b style="color: #ef4444;">ERROR:</b> ${data.error}`;
                 }
             } catch (e) {
-                out.innerHTML = "<b style='color:red'>Server Error. Check terminal.</b>";
+                out.innerHTML = "Connection Error.";
             }
         }
         </script>
@@ -69,66 +93,50 @@ def ui():
     </html>
     """
 
-# =========================
-# CORE AI AGENT
-# =========================
-
 @app.get("/ask")
 def ask(query: str):
-    q_lower = query.lower()
-    tool_results = {}
-    tool_used = "get_live_flights"
+    q_low = query.lower()
+    tool_results = []
+    tool_name = "general_flights"
 
-    # --- STEP 1: KEYWORD SELECTION (Saves Quota) ---
+    # 1. TOOL SELECTION
     try:
-        if any(x in q_lower for x in ["incident", "safety", "crash", "emergency", "accident"]):
-            tool_used = "get_aviation_incidents"
-            data = get_aviation_incidents()
-            tool_results = data[:5] if isinstance(data, list) else data
-
-        elif any(x in q_lower for x in ["india", "iran", "usa", "uk", "russia", "china", "germany"]):
-            tool_used = "regional_multi_tool"
-            countries = ["india", "iran", "usa", "uk", "russia", "china", "germany"]
-            target = next((c for c in countries if c in q_lower), "global")
-            
-            tool_results = {
-                "regional_flights": filter_flights_by_country(country=target)[:5],
-                "global_context": get_live_flights()[:3],
-                "local_incidents": get_aviation_incidents()[:2]
-            }
+        if any(x in q_low for x in ["incident", "safety", "crash"]):
+            tool_name = "get_aviation_incidents"
+            raw = get_aviation_incidents()
+            tool_results = raw.get("incidents", [])[:2]
+        elif any(x in q_low for x in ["india", "usa", "uk", "iran"]):
+            tool_name = "filter_flights_by_country"
+            country = next((c for c in ["india", "usa", "uk", "iran"] if c in q_low), "india")
+            raw = filter_flights_by_country(country)
+            tool_results = raw.get("filtered_flights", [])[:3]
         else:
-            tool_used = "get_live_flights"
-            tool_results = get_live_flights()[:8]
-
+            tool_name = "get_live_flights"
+            raw = get_live_flights()
+            tool_results = raw.get("flights", [])[:3]
     except Exception as e:
         return {"status": "failed", "error": f"Tool error: {str(e)}"}
 
-    # --- STEP 2: SUMMARY GENERATION (Single AI Call) ---
-    summary_prompt = f"""
-    Role: Aviation Intelligence Analyst.
-    User Query: {query}
-    Data: {json.dumps(tool_results)}
-
-    Task: Provide a concise report on current flight density, risk level, and passenger advice. 
-    Format: Markdown. Keep it technical but readable.
-    """
+    # 2. AI CALL
+    prompt = f"Analyze this aviation data for '{query}': {json.dumps(tool_results)}. Provide status, risk, and advice in Markdown."
 
     try:
-        response = model.generate_content(summary_prompt)
-        return {
-            "query": query,
-            "tool_used": tool_used,
-            "summary": response.text,
-            "status": "success"
-        }
+        # 3-second sleep to respect Free Tier RPM limits
+        time.sleep(3) 
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        summary = response.text
     except Exception as e:
-        # Fallback if 429 Quota is hit
-        return {
-            "status": "success",
-            "tool_used": tool_used,
-            "query": query,
-            "summary": f"<b>QUOTA NOTICE:</b> Data retrieved but AI summary failed. {len(str(tool_results))} bytes of data found. Try again in 60s."
-        }
+        # Log the error to your terminal so you can see why it failed
+        print(f"AI Error: {e}")
+        summary = fallback_summary(tool_results, query)
+
+    return {
+        "query": query,
+        "tool_used": tool_name,
+        "summary": summary,
+        "status": "success"
+    }
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

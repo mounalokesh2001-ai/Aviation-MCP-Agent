@@ -9,7 +9,7 @@ def get_live_flights():
         data = response.json()
 
         flights = []
-        for state in data.get("states", [])[:10]:
+        for state in data.get("states", [])[:100]:  # Increased from 10 to 100
             flights.append({
                 "icao24": state[0],
                 "callsign": state[1],
